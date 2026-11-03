@@ -1,0 +1,58 @@
+const {chromium}=require('playwright');
+const {spawn}=require('node:child_process');
+const fs=require('node:fs');
+(async()=>{
+ const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','4173'],{stdio:'pipe'});
+ let browser;
+ try {
+  for(let i=0;i<60;i++){try{const r=await fetch('http://127.0.0.1:4173');if(r.ok)break;}catch{}await new Promise(r=>setTimeout(r,250));}
+  browser=await chromium.launch({executablePath:process.env.ECHO_TEST_CHROMIUM||(fs.existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined),headless:true,args:process.platform==='linux'?['--no-sandbox','--use-angle=swiftshader','--enable-unsafe-swiftshader']:[]});
+  const page=await browser.newPage({viewport:{width:1440,height:900}});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+  await page.goto('http://127.0.0.1:4173');
+  await page.waitForFunction(()=>window.echoDiagnostics?.().ready,{},{timeout:90000});
+  fs.mkdirSync('test-results',{recursive:true});
+  await page.screenshot({path:'test-results/menu.png'});
+  const canvasBounds=await page.locator('#game').boundingBox();
+  if(canvasBounds.width!==1440 || canvasBounds.height!==900) throw new Error('Canvas CSS failed to fill viewport');
+  await page.click('#drive');
+  await page.waitForTimeout(1800);
+  const initial=await page.evaluate(()=>window.echoDiagnostics());
+  console.log('Initial',initial);
+  await page.keyboard.down('w');await page.waitForFunction(()=>window.echoDiagnostics().speed>6 && window.echoDiagnostics().position[2]>3,{}, {timeout:60000});await page.keyboard.up('w');
+  const driving=await page.evaluate(()=>window.echoDiagnostics());
+  console.log('Driving',driving);
+  if(driving.speed<2)throw new Error('Throttle did not accelerate the physical vehicle');
+  if(Math.hypot(driving.position[0]-initial.position[0],driving.position[2]-initial.position[2])<2)throw new Error('Vehicle did not move');
+  await page.screenshot({path:'test-results/driving.png'});
+  await page.keyboard.press('Escape');
+  const pauseStart=await page.evaluate(()=>window.echoDiagnostics());
+  await page.waitForTimeout(600);
+  const pauseEnd=await page.evaluate(()=>window.echoDiagnostics());
+  if(!pauseEnd.paused || JSON.stringify(pauseStart.position)!==JSON.stringify(pauseEnd.position))throw new Error('Pause did not freeze simulation');
+  await page.click('#recover');await page.waitForTimeout(200);
+  await page.click('#drive');await page.waitForTimeout(400);
+  const recovered=await page.evaluate(()=>window.echoDiagnostics());
+  if(Math.abs(recovered.position[2])>1)throw new Error('Recovery did not return car to start');
+  await page.keyboard.down('s');await page.waitForFunction(()=>window.echoDiagnostics().speed< -2,{}, {timeout:60000});await page.keyboard.up('s');
+  const reverse=await page.evaluate(()=>window.echoDiagnostics());
+  console.log('Reverse',reverse);
+  if(reverse.speed>-.5)throw new Error('Reverse did not work');
+  await page.keyboard.press('Escape');
+  await page.click('#recover');
+  await page.click('summary');
+  await page.selectOption('#quality','1.5');
+  await page.uncheck('#bloom');
+  await page.click('#drive');
+  await page.keyboard.down('w');await page.keyboard.down('a');
+  await page.waitForFunction(()=>window.echoDiagnostics().position[0]<109 && window.echoDiagnostics().position[2]>3,{}, {timeout:60000});
+  await page.keyboard.up('w');await page.keyboard.up('a');
+  await page.keyboard.down('b');
+  await page.waitForFunction(()=>Math.abs(window.echoDiagnostics().speed)<1,{}, {timeout:60000});
+  await page.keyboard.up('b');
+  console.log('PASS: left steering changes physical trajectory; service brake reduces speed below 1 m/s.');
+  if(errors.length)throw new Error(errors.join('\n'));
+  console.log('PASS: WebGL2 render, Havok load, forward/reverse physics, displacement, pause, reset; no browser errors.');
+ }finally{await browser?.close();server.kill();}
+})().catch(e=>{console.error(e);process.exitCode=1;});
